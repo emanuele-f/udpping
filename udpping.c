@@ -12,6 +12,26 @@
 #include <ws2tcpip.h>
 
 #pragma comment(lib, "Ws2_32.lib")
+
+#else // unix
+
+#include <arpa/inet.h>
+#include <netinet/in.h>
+#include <pthread.h>
+#include <string.h>
+#include <time.h>
+#include <unistd.h>
+
+typedef int SOCKET;
+#define _strdup strdup
+#define closesocket close
+#define Sleep(x) usleep(x * 1000)
+#define SOCKET_ERROR -1
+#define INVALID_SOCKET -1
+#define LPVOID void*
+
+#define min(x, y) (((x) < (y)) ? (x) : (y))
+#define max(x, y) (((x) > (y)) ? (x) : (y))
 #endif
 
 #define MAX_SIZE 1500
@@ -104,7 +124,13 @@ static bool parse_args(int argc, char **argv, prog_args *args) {
 		return false;
 	}
 
-	if ((args->mode == MODE_CLIENT) && (args->client.server_addr.S_un.S_addr == 0)) {
+	if ((args->mode == MODE_CLIENT)
+#ifdef WIN32
+			&& (args->client.server_addr.S_un.S_addr == 0)
+#else
+			&& (args->client.server_addr.s_addr == 0)
+#endif
+	) {
 		puts("invalid server address");
 		return false;
 	}
@@ -117,22 +143,42 @@ static bool parse_args(int argc, char **argv, prog_args *args) {
 	return true;
 }
 
+#ifdef WIN32
+
 static inline int64_t GetTicks() {
 	LARGE_INTEGER ticks;
-	if (!QueryPerformanceCounter(&ticks))
-	{
+	if (!QueryPerformanceCounter(&ticks)) {
 		puts("QueryPerformanceCounter failed");
 		return 0;
 	}
 	return ticks.QuadPart;
 }
 
+#else
+
+static inline int64_t GetTicks() {
+	struct timespec ts;
+
+	if(clock_gettime(CLOCK_MONOTONIC_RAW, &ts) == -1) {
+		puts("clock_gettime failed");
+		return 0;
+	}
+
+	return ((int64_t) ts.tv_sec) * 1000000000 + ts.tv_nsec;
+}
+
+#endif
+
 static bool run_server(prog_args *args) {
 	char buffer[MAX_SIZE];
 	struct sockaddr_in servaddr = {
 		.sin_family = AF_INET,
 		.sin_port = htons(args->port),
+#ifdef WIN32
 		.sin_addr.S_un.S_addr = INADDR_ANY,
+#else
+		.sin_addr.s_addr = INADDR_ANY,
+#endif
 	}, cliaddr;
 	SOCKET sock = socket(AF_INET, SOCK_DGRAM, 0);
 
@@ -147,7 +193,7 @@ static bool run_server(prog_args *args) {
 	}
 
 	while (true) {
-		int len = sizeof(cliaddr);
+		socklen_t len = sizeof(cliaddr);
 		int n = recvfrom(sock, buffer, MAX_SIZE, 0, (struct sockaddr*)&cliaddr, &len);
 		if (n == SOCKET_ERROR) {
 			printf("recvfrom failed\n");
@@ -163,7 +209,12 @@ static bool run_server(prog_args *args) {
 	return true;
 }
 
-DWORD WINAPI ReceiverThread(LPVOID lpParam) {
+#ifdef WIN32
+DWORD WINAPI
+#else
+void*
+#endif
+ReceiverThread(LPVOID lpParam) {
 	char buffer[MAX_SIZE];
 	client_state* state = (client_state*) lpParam;
 	phdr* hdr = (phdr*)(buffer);
@@ -208,10 +259,15 @@ static bool run_client(prog_args* args) {
 		.sin_port = htons(args->port),
 		.sin_addr = args->client.server_addr,
 	};
-	int slen = sizeof(servaddr);
 
 	// ensure that the receiver thread wakes after some time
+#ifdef WIN32
 	DWORD timeoutMs = 100;
+#else
+	struct timeval timeoutMs;
+	timeoutMs.tv_sec = 0;
+	timeoutMs.tv_usec = 100000;
+#endif
 	if (setsockopt(sock,
 			SOL_SOCKET,
 			SO_RCVTIMEO,
@@ -222,13 +278,19 @@ static bool run_client(prog_args* args) {
 	}
 
 	client_state state = { .sock = sock, .args = args, .running = true };
+
+#ifdef WIN32
 	LARGE_INTEGER frequency;
 	if (!QueryPerformanceFrequency(&frequency)) {
 		puts("QueryPerformanceFrequency failed");
 		return false;
 	}
 	state.freq = (double)frequency.QuadPart / 1e3; // msec
+#else
+	state.freq = 1e6; // sec -> msec
+#endif
 
+#ifdef WIN32
 	// start receiver thread
 	DWORD threadId;
 	HANDLE threadHandle = CreateThread(
@@ -249,6 +311,29 @@ static bool run_client(prog_args* args) {
 	if (!SetThreadPriority(curThread, THREAD_PRIORITY_HIGHEST))
 		printf("SetThreadPriority (sender) failed\n");
 	CloseHandle(curThread);
+#else
+	pthread_t receiver_thread;
+
+	if(pthread_create(&receiver_thread, NULL, ReceiverThread, &state)) {
+		printf("pthread_create failed\n");
+		return false;
+	}
+
+	pthread_attr_t thAttr;
+	int policy = 0;
+	int max_prio_for_policy = 0;
+
+	pthread_attr_init(&thAttr);
+	pthread_attr_getschedpolicy(&thAttr, &policy);
+	max_prio_for_policy = sched_get_priority_max(policy);
+	pthread_attr_destroy(&thAttr);
+
+	if(pthread_setschedprio(receiver_thread, max_prio_for_policy))
+		printf("set thread priority (receiver) failed\n");
+
+	if(pthread_setschedprio(pthread_self(), max_prio_for_policy))
+		printf("set thread priority (sender) failed\n");
+#endif
 
 	// bind the socket to perform route lookup now
 	if (connect(sock, (struct sockaddr*)&servaddr, sizeof(servaddr)) == SOCKET_ERROR) {
@@ -279,15 +364,20 @@ static bool run_client(prog_args* args) {
 	Sleep(500);
 	state.running = false;
 
+#ifdef WIN32
 	WaitForSingleObject(threadHandle, INFINITE);
 	CloseHandle(threadHandle);
+#else
+	pthread_join(receiver_thread, NULL);
+#endif
+
 	closesocket(sock);
 
 	// print stats
-	int lost = args->client.num_packets - state.num_pkts;
+	int lost = max(args->client.num_packets - state.num_pkts, 0);
 	printf("Statistics for %s\n\tPackets: Sent = %d, Received = %d, Lost = %d (%d %% loss)\n",
 		args->client.server, args->client.num_packets, state.num_pkts, lost,
-		(double)lost * 100.0 / args->client.num_packets);
+		(int)((double)lost * 100.0 / args->client.num_packets));
 
 	double avg_rtt = (double)state.tot_rtt / state.num_pkts;
 	printf("\tRTT (ms): Min = %.1f, Max = %.1f, Avg = %.1f\n",
