@@ -61,6 +61,8 @@ typedef struct {
 		int num_packets;
 		int pkt_size;
 		int interval_ms;
+		int timeout_ms;
+		int wait_ms;
 	} client;
 } prog_args;
 
@@ -86,13 +88,15 @@ static void usage() {
 		"  -n packets           number of packets to send (default 4)\n"
 		"  -b size              size of the UDP payload (default 64 B)\n"
 		"  -i interval_ms       interval for the packets send (default 1000)\n"
+		"  -t timeout_ms        receiver thread socket timeout (default 100)\n"
+		"  -w wait_ms           timeout to wait for the reception of all the packets (default 500)\n"
 	);
 }
 
 static bool parse_args(int argc, char **argv, prog_args *args) {
 	int c;
 
-	while ((c = getopt(argc, argv, "sc:p:n:b:i:")) != -1) {
+	while ((c = getopt(argc, argv, "sc:p:n:b:i:t:w:")) != -1) {
 		switch (c) {
 		case 's':
 			args->mode = MODE_SERVER;
@@ -113,6 +117,12 @@ static bool parse_args(int argc, char **argv, prog_args *args) {
 			break;
 		case 'i':
 			args->client.interval_ms = atoi(optarg);
+			break;
+		case 't':
+			args->client.timeout_ms = atoi(optarg);
+			break;
+		case 'w':
+			args->client.wait_ms = atoi(optarg);
 			break;
 		default:
 			return false;
@@ -254,11 +264,11 @@ static bool run_client(prog_args* args) {
 
 	// ensure that the receiver thread wakes after some time
 #ifdef WIN32
-	DWORD timeoutMs = 100;
+	DWORD timeoutMs = args->client.timeout_ms;
 #else
 	struct timeval timeoutMs;
 	timeoutMs.tv_sec = 0;
-	timeoutMs.tv_usec = 100000;
+	timeoutMs.tv_usec = args->client.timeout_ms * 1000;
 #endif
 	if (setsockopt(sock,
 			SOL_SOCKET,
@@ -332,10 +342,12 @@ static bool run_client(prog_args* args) {
 		printf("connect failed\n");
 		return false;
 	}
-	Sleep(50);
 
 	int num_sent = 0;
 	while (num_sent < args->client.num_packets) {
+		if(args->client.interval_ms > 0)
+			Sleep(args->client.interval_ms);
+
 		hdr->magic = PING_MAGIC;
 		hdr->seqno = num_sent;
 		hdr->send_ts = GetTicks();
@@ -349,11 +361,11 @@ static bool run_client(prog_args* args) {
 		}
 
 		num_sent++;
-		Sleep(args->client.interval_ms);
 	}
 
-	// wait some time
-	Sleep(500);
+	// wait some time to receive all the datagrams
+	if(args->client.wait_ms > 0)
+		Sleep(args->client.wait_ms);
 	state.running = false;
 
 #ifdef WIN32
@@ -392,6 +404,8 @@ int main(int argc, char **argv) {
 			.num_packets = 4,
 			.pkt_size = 64,
 			.interval_ms = 1000,
+			.timeout_ms = 100,
+			.wait_ms = 500,
 		}
 	};
 
