@@ -52,14 +52,14 @@ typedef enum {
 } prog_mode;
 
 typedef struct {
-	int port;
+	unsigned short port;
 	prog_mode mode;
 
 	struct {
 		char* server;
 		struct in_addr server_addr;
 		int num_packets;
-		unsigned pkt_size;
+		int pkt_size;
 		int interval_ms;
 	} client;
 } prog_args;
@@ -103,7 +103,7 @@ static bool parse_args(int argc, char **argv, prog_args *args) {
 			inet_pton(AF_INET, optarg, &args->client.server_addr);
 			break;
 		case 'p':
-			args->port = atoi(optarg);
+			args->port = (unsigned short) atoi(optarg);
 			break;
 		case 'n':
 			args->client.num_packets = atoi(optarg);
@@ -125,11 +125,7 @@ static bool parse_args(int argc, char **argv, prog_args *args) {
 	}
 
 	if ((args->mode == MODE_CLIENT)
-#ifdef WIN32
-			&& (args->client.server_addr.S_un.S_addr == 0)
-#else
 			&& (args->client.server_addr.s_addr == 0)
-#endif
 	) {
 		puts("invalid server address");
 		return false;
@@ -174,11 +170,7 @@ static bool run_server(prog_args *args) {
 	struct sockaddr_in servaddr = {
 		.sin_family = AF_INET,
 		.sin_port = htons(args->port),
-#ifdef WIN32
-		.sin_addr.S_un.S_addr = INADDR_ANY,
-#else
 		.sin_addr.s_addr = INADDR_ANY,
-#endif
 	}, cliaddr;
 	SOCKET sock = socket(AF_INET, SOCK_DGRAM, 0);
 
@@ -295,10 +287,10 @@ static bool run_client(prog_args* args) {
 	DWORD threadId;
 	HANDLE threadHandle = CreateThread(
 		NULL,                   // default security attributes
-		0,                      // use default stack size  
+		0,                      // use default stack size
 		ReceiverThread,			// thread function name
-		&state,					// argument to thread function 
-		0,                      // use default creation flags 
+		&state,					// argument to thread function
+		0,                      // use default creation flags
 		&threadId);
 	if (threadHandle == NULL) {
 		printf("CreateThread failed\n");
