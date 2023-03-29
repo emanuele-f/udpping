@@ -63,6 +63,7 @@ typedef struct {
 		int interval_ms;
 		int timeout_ms;
 		int wait_ms;
+		int omit_seconds;
 	} client;
 } prog_args;
 
@@ -72,6 +73,7 @@ typedef struct {
 	int64_t max_rtt;
 	int64_t tot_rtt;
 	int num_pkts;
+	int num_acc_pkts;
 	SOCKET sock;
 	double freq;
 	const prog_args* args;
@@ -90,13 +92,14 @@ static void usage() {
 		"  -i interval_ms       interval for the packets send (default 1000)\n"
 		"  -t timeout_ms        receiver thread socket timeout (default 100)\n"
 		"  -w wait_ms           timeout to wait for the reception of all the packets (default 500)\n"
+		"  -O seconds           omit the first n seconds from stats calculation\n"
 	);
 }
 
 static bool parse_args(int argc, char **argv, prog_args *args) {
 	int c;
 
-	while ((c = getopt(argc, argv, "sc:p:n:b:i:t:w:")) != -1) {
+	while ((c = getopt(argc, argv, "sc:p:n:b:i:t:w:O:")) != -1) {
 		switch (c) {
 		case 's':
 			args->mode = MODE_SERVER;
@@ -123,6 +126,9 @@ static bool parse_args(int argc, char **argv, prog_args *args) {
 			break;
 		case 'w':
 			args->client.wait_ms = atoi(optarg);
+			break;
+		case 'O':
+			args->client.omit_seconds = atoi(optarg);
 			break;
 		default:
 			return false;
@@ -221,25 +227,38 @@ ReceiverThread(LPVOID lpParam) {
 	client_state* state = (client_state*) lpParam;
 	phdr* hdr = (phdr*)(buffer);
 
+	int64_t start_ticks = GetTicks();
+	int64_t ticks_before_accounting = (state->args->client.omit_seconds > 0) ?
+		(start_ticks + (int64_t)state->args->client.omit_seconds * 1000 * state->freq) :
+		start_ticks;
+
 	while (state->running) {
 		int n = recv(state->sock, buffer, MAX_SIZE, 0);
 		int64_t now = GetTicks();
 
 		if ((n == state->args->client.pkt_size) && (hdr->magic == PING_MAGIC)) {
-			// TODO check seq
 			int64_t rtt = now - hdr->send_ts;
-			if (state->num_pkts == 0) {
-				state->min_rtt = rtt;
-				state->max_rtt = rtt;
-			} else {
-				state->min_rtt = min(rtt, state->min_rtt);
-				state->max_rtt = max(rtt, state->max_rtt);
-			}
-			state->tot_rtt += rtt;
+			bool omitted = false;
+
+			if (now >= ticks_before_accounting) {
+				// TODO check seq
+				if (state->num_acc_pkts == 0) {
+					state->min_rtt = rtt;
+					state->max_rtt = rtt;
+				}
+				else {
+					state->min_rtt = min(rtt, state->min_rtt);
+					state->max_rtt = max(rtt, state->max_rtt);
+				}
+				state->tot_rtt += rtt;
+				state->num_acc_pkts++;
+			} else
+				omitted = true;
+
 			state->num_pkts++;
 
-			printf("Reply from %s: bytes=%u time=%.1fms\n", state->args->client.server,
-				state->args->client.pkt_size, rtt / state->freq);
+			printf("Reply from %s: bytes=%u time=%.1fms%s\n", state->args->client.server,
+				state->args->client.pkt_size, rtt / state->freq, omitted ? " (omitted)" : "");
 		}
 	}
 
@@ -345,9 +364,6 @@ static bool run_client(prog_args* args) {
 
 	int num_sent = 0;
 	while (num_sent < args->client.num_packets) {
-		if(args->client.interval_ms > 0)
-			Sleep(args->client.interval_ms);
-
 		hdr->magic = PING_MAGIC;
 		hdr->seqno = num_sent;
 		hdr->send_ts = GetTicks();
@@ -361,6 +377,9 @@ static bool run_client(prog_args* args) {
 		}
 
 		num_sent++;
+
+		if (args->client.interval_ms > 0)
+			Sleep(args->client.interval_ms);
 	}
 
 	// wait some time to receive all the datagrams
