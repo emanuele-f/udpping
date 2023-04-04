@@ -58,6 +58,7 @@ typedef struct {
 	struct {
 		char* server;
 		struct in_addr server_addr;
+		bool quiet;
 		int num_packets;
 		int pkt_size;
 		int interval_ms;
@@ -87,6 +88,7 @@ static void usage() {
 		"  -c server            connect to the given server IP\n"
 		"  -p port              specify UDP port (default 6000)\n"
 		"\nClient options:\n"
+		"  -q                   quiet mode, don't print individual individual packets\n"
 		"  -n packets           number of packets to send (default 4)\n"
 		"  -b size              size of the UDP payload (default 64 B)\n"
 		"  -i interval_ms       interval for the packets send (default 1000)\n"
@@ -99,7 +101,7 @@ static void usage() {
 static bool parse_args(int argc, char **argv, prog_args *args) {
 	int c;
 
-	while ((c = getopt(argc, argv, "sc:p:n:b:i:t:w:O:")) != -1) {
+	while ((c = getopt(argc, argv, "sc:p:n:b:i:t:w:O:q")) != -1) {
 		switch (c) {
 		case 's':
 			args->mode = MODE_SERVER;
@@ -129,6 +131,9 @@ static bool parse_args(int argc, char **argv, prog_args *args) {
 			break;
 		case 'O':
 			args->client.omit_seconds = atoi(optarg);
+			break;
+		case 'q':
+			args->client.quiet = true;
 			break;
 		default:
 			return false;
@@ -257,8 +262,9 @@ ReceiverThread(LPVOID lpParam) {
 
 			state->num_pkts++;
 
-			printf("Reply from %s: bytes=%u time=%.1fms%s\n", state->args->client.server,
-				state->args->client.pkt_size, rtt / state->freq, omitted ? " (omitted)" : "");
+			if(!state->args->client.quiet)
+				printf("Reply from %s: bytes=%u time=%.1fms%s\n", state->args->client.server,
+					state->args->client.pkt_size, rtt / state->freq, omitted ? " (omitted)" : "");
 		}
 	}
 
