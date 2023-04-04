@@ -402,7 +402,7 @@ static bool run_client(prog_args* args) {
 		args->client.server, args->client.num_packets, state.num_pkts, lost,
 		(int)((double)lost * 100.0 / args->client.num_packets));
 
-	double avg_rtt = (double)state.tot_rtt / state.num_pkts;
+	double avg_rtt = (double)state.tot_rtt / state.num_acc_pkts;
 	printf("\tRTT (ms): Min = %.1f, Max = %.1f, Avg = %.1f\n",
 		state.min_rtt / state.freq,
 		state.max_rtt / state.freq,
